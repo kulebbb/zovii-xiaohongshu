@@ -193,15 +193,15 @@
 
 <div class="step"><div class="step-rail"><div class="step-dot">5</div><div class="step-line"></div></div>
 <div class="step-body">
-  <h3>zovii 生图 · 双层并发</h3>
+  <h3>zovii 生图 · 行间并发 × 行内两段式</h3>
   <div class="branch">
     <div>
       <h4>行间：多行并发（默认 10 行）</h4>
       <p><code>run_rows.py</code> 统一调度：main 串行预取所有输入防飞书限流 → 参考图串行下载进 tmp/ → worker 并发生成回填 → 限流自动退避重试</p>
     </div>
     <div>
-      <h4>行内：按依赖判断模式</h4>
-      <p>拆解词出现引用表述（作为参考图 / 以封面为基准 / 延续 / 锚点…）→ <b>sequential</b>：封面先行、封面 assetId 作配图风格锚点；明确独立或无表述 → <b>parallel</b>：全图并发（默认）</p>
+      <h4>行内：默认 sequential 两段式（唯一核心概念）</h4>
+      <p>默认 <b>sequential</b>：封面先行、封面 assetId 作<b>所有配图</b>的风格锚点，整组风格一致无需任何提示词表述；仅拆图提示词明确写「每张图独立 / 各图互不相关」才退化为无锚点的 <b>parallel</b> 全图并发。非封面参考图用在哪张图，必须在拆图提示词显式声明（如「产品图仅用于图片3」），未声明不附加、不猜测</p>
     </div>
   </div>
   <div class="panel">
@@ -250,13 +250,13 @@
   <ol class="tight" style="padding-left:34px">
     <li><b>先问再干</b>：颗粒度、模型、比例三问必须在开工前完成</li>
     <li><b>只单图生成</b>：一律 generate-image，禁 batch</li>
-    <li><b>按依赖定锚点</b>：有图间依赖 → 封面锚定；无 → 行内并发</li>
+    <li><b>默认 sequential，封面必为配图锚点</b>：显式声明整组独立才回退无锚点并发</li>
     <li><b>行间并发 10 行</b>，参考图按行隔离在 tmp/ 子目录</li>
     <li><b>列名不猜</b>：读出来核对一次</li>
     <li><b>状态可追踪</b>：中断续跑按状态跳过已完成行</li>
     <li><b>失败不静默</b>：记录原因，最后统一汇报清单</li>
     <li><b>回填相对路径</b>：cd 进图片目录再用 ./xxx.png</li>
-    <li><b>默认并发</b>：无依赖表述即 parallel</li>
+    <li><b>参考图按列类型 + 声明分配到图号，未声明不猜测</b>：封面参考图默认给图1；产品图/其他参考图N 用在哪张图由拆图提示词显式声明，未声明不参与生成</li>
     <li><b>参考图临时化 <span class="badge-new">NEW</span></b>：先落 tmp/ 再上传，任务结束必删；生成图是交付物不在此列</li>
   </ol>
 </div>

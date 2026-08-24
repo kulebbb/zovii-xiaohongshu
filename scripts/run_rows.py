@@ -8,6 +8,7 @@
 
 并发策略:
     - 行间并发（默认 10 行），行内模式由 judge_mode 按拆图提示词判断
+      （默认 sequential 两段式；仅拆图提示词显式声明整组独立才 parallel）
     - 数据预取：main 串行批量读取所有行输入（避免多 worker 并发读表格触发飞书 API 限流）
     - 参考图下载串行化（lark-cli api 每 token 一次调用）
     - lark-cli 调用遇限流(99991400)自动退避重试
@@ -25,12 +26,13 @@
     - 任务结束（无论成败）自动删除整个任务临时目录；--keep-tmp 可调试保留
     - 启动时自动清扫 tmp/zovii-refs/ 下超过 3 天的残留目录
 
-输出: JSON {"2": {"status":"completed","mode":"parallel","elapsed":..}, ...}
+输出: JSON {"2": {"status":"completed","mode":"sequential","elapsed":..}, ...}
 清理信息走 stderr，不污染 stdout 的 JSON。
 """
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,22 +43,73 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DEP_WORDS = ["作为参考图", "作为参考", "以封面为", "以图1为", "以首图为",
-             "基于图", "在图1基础上", "在图2基础上", "在图3基础上",
-             "延续", "承接", "参照", "跟随", "锚点", "保持一致",
-             "使用图1", "使用封面", "封面作为", "图1作为", "风格统一"]
-INDEP_WORDS = ["每张图独立", "各图独立", "互不相关", "单独设计", "独立构图"]
+# 仅认「整组级独立声明」；单图级描述词（如「单独设计构图」）不算，
+# 防止误触 parallel 静默丢掉封面锚点。
+INDEP_WORDS = ["每张图独立", "各图独立", "互不相关", "相互独立"]
+
+# 子句切分：参考图列名与其目标图号必须出现在同一子句才算显式声明
+_CLAUSE_SPLIT_RE = re.compile(r"[，。；,;、\n\r]+")
 
 
 def judge_mode(decompose_text):
-    """根据拆图提示词判断行内模式。返回 'sequential' / 'parallel'"""
-    if not decompose_text:
+    """默认 sequential：封面→配图带封面锚点；仅显式声明整组独立才 parallel"""
+    if decompose_text and any(w in decompose_text for w in INDEP_WORDS):
         return "parallel"
-    if any(w in decompose_text for w in INDEP_WORDS):
-        return "parallel"
-    if any(w in decompose_text for w in DEP_WORDS):
-        return "sequential"
-    return "parallel"  # 默认并发
+    return "sequential"
+
+
+def parse_ref_assignments(decompose_text, ref_names):
+    """从拆图提示词解析 参考图→图号 显式映射。
+
+    规则：参考图列名与目标图号出现在同一子句才算声明，
+    如「产品图仅用于图片3」「其他参考图1用于图片2」。
+    「产品参考图还原」「为产品页」等不含精确列名的表述不会被误识别。
+    返回 {列名: set(图号)}；未声明的参考图不在结果中（未声明不猜测）。
+    """
+    declared = {}
+    if not decompose_text or not ref_names:
+        return declared
+    clauses = _CLAUSE_SPLIT_RE.split(decompose_text)
+    for name in ref_names:
+        pat = re.compile(re.escape(name) + r"(?!\d)")  # 防「其他参考图1」误匹配「…10」
+        hits = set()
+        for clause in clauses:
+            if not pat.search(clause):
+                continue
+            # 掩掉所有参考图名再提图号，避免「其他参考图1」的序号被当成目标图号
+            masked = clause
+            for other in ref_names:
+                masked = re.sub(re.escape(other) + r"(?!\d)",
+                                "＊" * len(other), masked)
+            hits.update(int(m) for m in re.findall(r"图片?\s*(\d+)", masked))
+        if hits:
+            declared[name] = hits
+    return declared
+
+
+def assign_ref_images(ref_paths_by_name, decompose_text, n):
+    """按 显式声明 > 列类型默认 把参考图分配到图号。
+
+    - 任意列名：拆图提示词显式声明 → 按声明分配（可多个图号）
+    - 封面参考图未声明 → 图 1（封面默认锚点来源）
+    - 产品图/其他参考图N 未声明 → 不附加（未声明不猜测）
+    返回 {图号: [本地路径]}；声明的图号超出该行图片数时 stderr 警告并忽略。
+    """
+    assigned = {}
+    if not ref_paths_by_name:
+        return assigned
+    declared = parse_ref_assignments(decompose_text, list(ref_paths_by_name))
+    for name, paths in ref_paths_by_name.items():
+        targets = declared.get(name)
+        if targets is None and "封面" in name:
+            targets = {1}
+        for t in sorted(targets or ()):
+            if not 1 <= t <= n:
+                sys.stderr.write(f"[refs] 警告: 参考图「{name}」声明的图{t} "
+                                 f"超出该行图片数 n={n}，已忽略\n")
+                continue
+            assigned.setdefault(t, []).extend(paths)
+    return assigned
 
 
 def run_cli(cmd, cwd=None, retries=4):
@@ -169,17 +222,22 @@ def verify_row_anchor(url, sid, row, ncol, batch_val):
     return True, ""
 
 
-def fetch_ref_images(url, sid, ref_cols, ref_names, row, out_dir):
-    """下载该行参考图（单元格图片 / URL 文本）到 out_dir。返回 {1: [路径]}"""
+def fetch_ref_images(url, sid, ref_cols, ref_names, row, out_dir,
+                     decompose="", n=1):
+    """下载该行参考图（单元格图片 / URL 文本）到 out_dir。
+
+    按「拆图提示词显式声明 > 列类型默认」分配到图号，返回 {图号: [本地路径]}；
+    分配规则见 assign_ref_images（封面参考图默认图1；其余未声明不附加）。
+    """
     if not ref_cols:
         return {}
     rng = f"{ref_cols[0]}{row}:{ref_cols[-1]}{row}"
     d = cells_get(url, sid, rng)
     ranges = d.get("data", {}).get("ranges", [])
-    refs = {}
     if not ranges:
-        return refs
+        return {}
     cells = ranges[0]["cells"][0]
+    paths_by_name = {}  # {列名: [本地路径]}
     for letter, name, cell in zip(ref_cols, ref_names, cells):
         embeds = [seg for seg in cell.get("rich_text", [])
                   if seg.get("type") == "embed-image"]
@@ -190,14 +248,14 @@ def fetch_ref_images(url, sid, ref_cols, ref_names, row, out_dir):
             run_cli(["lark-cli", "api", "GET",
                      f"/open-apis/drive/v1/medias/{token}/download",
                      "--as", "user", "--output", f"./{fname}"], cwd=out_dir)
-            refs.setdefault(1, []).append(dst)
+            paths_by_name.setdefault(name, []).append(dst)
             continue
         v = cell.get("value")
         if v and str(v).startswith(("http://", "https://")):
             path = os.path.join(out_dir, f"{row}-{name}.jpg")
             urllib.request.urlretrieve(str(v), path)
-            refs.setdefault(1, []).append(path)
-    return refs
+            paths_by_name.setdefault(name, []).append(path)
+    return assign_ref_images(paths_by_name, decompose, n)
 
 
 def process_row(row, inp, url, sid, project, model, ratio, size, timeout,
@@ -342,9 +400,10 @@ def main():
             prompts = [(p_map.get(row) or [""] * 12)[i] or "" for i in range(n)]
             row_ref_dir = os.path.join(tmp_dir, "refs", str(row))
             os.makedirs(row_ref_dir, exist_ok=True)
+            decompose = (d_map.get(row) or [""])[0]
             ref_map = fetch_ref_images(a.url, a.sheet_id, ref_cols, ref_names,
-                                       row, row_ref_dir)
-            inputs[row] = {"n": n, "decompose": (d_map.get(row) or [""])[0],
+                                       row, row_ref_dir, decompose=decompose, n=n)
+            inputs[row] = {"n": n, "decompose": decompose,
                            "prompts": prompts, "refs": ref_map,
                            "icol": icol, "scol": scol, "tcol": tcol}
 
