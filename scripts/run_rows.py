@@ -13,7 +13,12 @@
     - lark-cli 调用遇限流(99991400)自动退避重试
 
 每行流程:
-    生成图片（行内按模式并发）→ 下载回填单元格图片 → 更新状态+耗时列
+    行锚点校验（防错行）→ 生成图片（行内按模式并发）→ 下载回填单元格图片 → 更新状态+耗时列
+
+行锚点校验（防错行，重要）:
+    预取阶段对每行用绝对行号直读「图片数量」单元格，与 csv-get 批量映射值比对；
+    不一致 = 行号映射疑似错位 → 该行立即判失败并跳过，不生成、不回填、不写状态，
+    把「静默错装」变成「响亮报警」。
 
 参考图临时目录（重要）:
     - 参考图统一下载到 <cwd>/tmp/zovii-refs/<任务ID>/refs/<行号>/（--tmp-dir 可覆盖）
@@ -139,6 +144,29 @@ def cleanup_tmp(tmp_dir, keep):
         return
     shutil.rmtree(tmp_dir, ignore_errors=True)
     sys.stderr.write(f"[tmp] 已清理参考图临时目录: {tmp_dir}\n")
+
+
+def norm_cell(v):
+    return "" if v is None else str(v).strip()
+
+
+def verify_row_anchor(url, sid, row, ncol, batch_val):
+    """行锚点校验：以绝对行号直读单元格，与 csv-get 批量映射值比对。
+
+    两条读取路径独立：批量读按 csv-get 的 row_number 映射取值，直读按 A1 地址取值。
+    若映射错位（如相对/绝对行号语义不符、隐藏行偏移），两者必然不一致 → 响亮失败。
+    返回 (ok, 错误信息)。
+    """
+    try:
+        d = cells_get(url, sid, f"{ncol}{row}", include="value")
+        direct = d["data"]["ranges"][0]["cells"][0][0].get("value")
+    except Exception as e:
+        return False, f"行{row} 锚点校验读取失败: {e}"
+    if norm_cell(direct) != norm_cell(batch_val):
+        return False, (f"行{row} 行锚点校验失败: 绝对寻址读到的图片数量="
+                       f"{norm_cell(direct)!r}，批量读取={norm_cell(batch_val)!r}，"
+                       f"行号映射疑似错位，已跳过该行（未做任何写入）")
+    return True, ""
 
 
 def fetch_ref_images(url, sid, ref_cols, ref_names, row, out_dir):
@@ -297,10 +325,16 @@ def main():
                 ref_cols.append(letter)
                 ref_names.append(key)
 
-        # 预取每个输入行的输入 + 串行下载参考图（到 tmp/）
+        # 预取每个输入行的输入 + 行锚点校验 + 串行下载参考图（到 tmp/）
         inputs = {}
+        anchor_errors = {}  # row -> 报错信息；命中行不进入执行池，不产生任何写入
         for row in rows:
-            n = int((n_map.get(row) or ["0"])[0] or 0)
+            batch_n = (n_map.get(row) or [""])[0]
+            ok, msg = verify_row_anchor(a.url, a.sheet_id, row, ncol, batch_n)
+            if not ok:
+                anchor_errors[row] = msg
+                continue
+            n = int(batch_n or 0)
             if n < 1:
                 inputs[row] = {"n": 0, "decompose": "", "prompts": [],
                                "refs": {}, "icol": icol, "scol": scol, "tcol": tcol}
@@ -314,14 +348,20 @@ def main():
                            "prompts": prompts, "refs": ref_map,
                            "icol": icol, "scol": scol, "tcol": tcol}
 
-        # ===== 行间并发执行 =====
-        with ThreadPoolExecutor(max_workers=min(a.max_workers, len(rows))) as ex:
-            futs = {ex.submit(process_row, r, inputs[r], a.url, a.sheet_id,
-                              a.project, a.model, a.ratio, a.size, a.timeout,
-                              a.retry, out_root, a.dry_run): r for r in rows}
-            for fut in as_completed(futs):
-                r = futs[fut]
-                results[str(r)] = fut.result()
+        # ===== 行间并发执行（仅锚点校验通过的行）=====
+        runnable = [r for r in rows if r not in anchor_errors]
+        if runnable:
+            with ThreadPoolExecutor(max_workers=min(a.max_workers,
+                                                    len(runnable))) as ex:
+                futs = {ex.submit(process_row, r, inputs[r], a.url, a.sheet_id,
+                                  a.project, a.model, a.ratio, a.size, a.timeout,
+                                  a.retry, out_root, a.dry_run): r
+                        for r in runnable}
+                for fut in as_completed(futs):
+                    results[str(futs[fut])] = fut.result()
+        # 锚点校验失败的行：响亮计入失败清单
+        for r, msg in anchor_errors.items():
+            results[str(r)] = {"status": "failed", "error": msg}
     finally:
         # 无论成败，参考图临时目录一律清理（--keep-tmp 可保留调试）
         cleanup_tmp(tmp_dir, a.keep_tmp)

@@ -11,23 +11,36 @@
     --start-col   起始回填列字母（M -> 图1图片, N -> 图2图片 ...）
     --out         图片保存目录（脚本内部 cd 后回填，规避绝对路径被拒）
 
-输出: JSON [{"n":1,"assetId":"...","localPath":"...","filled":true}, ...]
+输出: JSON [{"n":1,"assetId":"...","localPath":"...","filled":true,"verified":true}, ...]
+
+防错行/防静默失败:
+    - 每张回填成功后读回该单元格，确认 embed-image 确实落格（verified 字段）
+    - 读回未见图片 → 记 filled=false 并计入失败清单（退出码 2），不静默
 """
 import argparse
 import json
 import os
 import subprocess
 import sys
+import time
 
 
-def run(cmd, cwd=None):
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
-    if r.returncode != 0:
-        err = r.stderr or r.stdout
+def run(cmd, cwd=None, retries=4):
+    """执行命令；遇飞书限流(99991400)自动退避重试"""
+    last_err = ""
+    for attempt in range(retries):
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+        if r.returncode == 0:
+            return r.stdout
+        err = (r.stderr or r.stdout) or ""
         for esc in ("\x1b[31m", "\x1b[0m", "\x1b[1m", "\x1b[36m"):
             err = err.replace(esc, "")
-        raise RuntimeError(err.strip() or "调用失败")
-    return json.loads(r.stdout)
+        last_err = err.strip() or "调用失败"
+        if "99991400" in last_err and attempt < retries - 1:
+            time.sleep(3 * (attempt + 1))
+            continue
+        raise RuntimeError(last_err)
+    raise RuntimeError(last_err)
 
 
 def col_letter(idx):
@@ -44,6 +57,17 @@ def col_index(letter):
     for ch in letter.upper():
         n = n * 26 + (ord(ch) - 65 + 1)
     return n - 1
+
+
+def cell_has_embed(url, sid, cell):
+    """读回单元格，确认 embed-image 已落格（防静默失败/落错格）"""
+    out = run(["lark-cli", "sheets", "+cells-get",
+               "--url", url, "--sheet-id", sid,
+               "--range", cell, "--as", "user",
+               "--include", "rich_text"])
+    c = json.loads(out)["data"]["ranges"][0]["cells"][0][0]
+    return any(seg.get("type") == "embed-image"
+               for seg in (c.get("rich_text") or []))
 
 
 def main():
@@ -95,12 +119,27 @@ def main():
               "--image", f"./{rel}"]
         try:
             run(fb, cwd=a.out)
-            results.append({"n": i + 1, "assetId": asset_id,
-                            "localPath": local, "cell": cell, "filled": True})
         except RuntimeError as e:
             results.append({"n": i + 1, "assetId": asset_id,
                             "localPath": local, "cell": cell,
                             "filled": False, "error": str(e)})
+            continue
+
+        # 3. 读回验证：确认图片确实落在这格（错格/静默失败在此暴露）
+        try:
+            verified = cell_has_embed(a.url, a.sheet_id, cell)
+            warn = ""
+        except RuntimeError as e:
+            verified = False
+            warn = f"（读回失败: {e}）"
+        if verified:
+            results.append({"n": i + 1, "assetId": asset_id,
+                            "localPath": local, "cell": cell,
+                            "filled": True, "verified": True})
+        else:
+            results.append({"n": i + 1, "assetId": asset_id,
+                            "localPath": local, "cell": cell, "filled": False,
+                            "error": f"回填后读回验证未在 {cell} 发现图片{warn}"})
 
     print(json.dumps(results, ensure_ascii=False, indent=2))
     failed = [r["n"] for r in results if not r.get("filled", False)

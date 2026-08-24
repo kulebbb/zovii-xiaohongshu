@@ -58,6 +58,7 @@ which lark-cli && lark-cli --version
    - 优先从用户消息提取 `https://...feishu.cn/(wiki|sheets)/...` 链接；没有就问
 2. **处理颗粒度**（用户确认的第 5 点，必须问）
    - 全部行 / 指定行号列表（如 `2-10` 或 `2,5,8`）/ 指定状态的行（如「待处理」行）/ 只处理新追加行
+   - ⚠️ **开跑前必须向用户复述口径并确认**：「将处理**绝对行号** X,Y,Z…（表头为第 1 行，数据从第 2 行起）；若表格有筛选/隐藏行，视觉行号可能与绝对行号不一致」——防止把「第 N 条数据」错传成绝对行号导致整批错位
 3. **zovii 项目**（projectId）
    - 先 `zovii list-projects` 让用户挑；没有合适项目 → `zovii create-project "<名称>"` 新建
 4. **模型**（用户确认的第 6 点，必须问）
@@ -237,8 +238,8 @@ lark-cli sheets +cells-set-image --url "<URL>" --sheet-name "<sheet>" \
 | `add_columns.py` | 自动追加图1~N提示词/图片/状态列并初始化状态 | `--url --sheet-id --max-n --row [--dry-run]` |
 | `read_cell.py` | 读单元格纯文本（供取提示词） | `--url --sheet-id --range` |
 | `generate_row_images.py` | 单行生成，行内并发（sequential=封面→配图并发 / parallel=全图并发），带重试 | `--project --model --ratio --prompts --mode [--refs] [--cover-ref]` |
-| `fillback_images.py` | 下载资产 + 回填单元格图片（自动处理相对路径） | `--url --sheet-id --row --start-col --assets --out [--dry-run]` |
-| `run_rows.py` | **行间并发调度**（默认10行）：每行自动读输入/判依赖/下载参考图/生成/回填/状态 | `--url --sheet-id --rows --project --model --ratio [--max-workers] [--out] [--dry-run]` |
+| `fillback_images.py` | 下载资产 + 回填单元格图片（自动处理相对路径）+ **读回验证落格** | `--url --sheet-id --row --start-col --assets --out [--dry-run]` |
+| `run_rows.py` | **行间并发调度**（默认10行）：每行自动锚点校验/读输入/判依赖/下载参考图/生成/回填/状态 | `--url --sheet-id --rows --project --model --ratio [--max-workers] [--out] [--dry-run]` |
 
 通用约定：所有脚本走 `--as user`；`<skill>` 指本 skill 安装目录（未安装时用项目路径）；脚本只读/写飞书表格与 zovii 资产，不执行其它副作用。
 
@@ -256,6 +257,7 @@ lark-cli sheets +cells-set-image --url "<URL>" --sheet-name "<sheet>" \
 8. **回填用相对路径**：`+cells-set-image` 的 `--image` 只接受当前目录内相对路径，先 `cd` 到图片目录再回填
 9. **默认并发**：无图间依赖表述即行内并发；依赖识别见 Step 5 词表
 10. **参考图临时化**：参考图先下载到 `tmp/zovii-refs/<任务ID>/` 再上传 zovii；任务结束（无论成败）必删该目录（脚本已内置 finally 清理）；生成图是交付物不在此列
+11. **写入前验锚、写入后读回**：`run_rows` 预取时对每行做锚点校验（绝对寻址直读 vs 批量映射值，不一致=行号错位→该行响亮失败、零写入）；`fillback` 每张回填后读回确认 embed 落格。任何校验不过立即报错，绝不静默错装
 
 ---
 
