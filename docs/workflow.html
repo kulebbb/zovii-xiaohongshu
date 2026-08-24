@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>zovii-xiaohongshu · 完整生图流程</title>
+<style>
+  :root{
+    --paper:#faf9f7; --ink:#22211f; --muted:#7a756d; --line:#e6e2da;
+    --accent:#b5432a; --accent-soft:#f6e8e3;
+    --ok:#2e6e4e; --ok-soft:#e7f1eb; --warn:#9a6b1f; --warn-soft:#f7efdd;
+    --new:#b5432a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.75; font-size:15px; padding:48px 20px 80px;
+  }
+  .wrap{max-width:940px;margin:0 auto}
+  header{border-bottom:3px solid var(--ink); padding-bottom:28px; margin-bottom:40px}
+  h1{font-family:"Songti SC","Noto Serif SC",serif; font-size:34px; letter-spacing:.02em}
+  header p.sub{color:var(--muted); margin-top:8px}
+  header .meta{margin-top:14px;font-size:13px;color:var(--muted)}
+  header .meta a{color:var(--accent)}
+  h2{
+    font-family:"Songti SC","Noto Serif SC",serif; font-size:22px; margin:52px 0 18px;
+    display:flex; align-items:center; gap:10px;
+  }
+  h2::before{content:""; width:10px;height:10px;background:var(--accent);flex:none}
+  h3{font-size:16px;margin:22px 0 10px}
+  p.note{color:var(--muted);font-size:13px;margin-top:6px}
+  .badge-new{
+    display:inline-block;background:var(--new);color:#fff;font-size:11px;
+    padding:1px 8px;border-radius:99px;vertical-align:2px;letter-spacing:.05em;font-weight:600
+  }
+  /* ── 总览管道 ── */
+  .pipeline{display:flex;flex-direction:column;gap:0;margin:24px 0}
+  .pipe-node{
+    border:1.5px solid var(--ink);background:#fff;padding:12px 18px;border-radius:10px;
+    display:flex;align-items:center;gap:14px;
+  }
+  .pipe-node b{font-size:15px}
+  .pipe-node span{color:var(--muted);font-size:13px}
+  .pipe-num{
+    font-family:"Songti SC",serif;font-weight:700;font-size:18px;color:#fff;background:var(--ink);
+    width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none
+  }
+  .arrow{width:2px;height:22px;background:var(--ink);margin-left:calc(18px + 14px);position:relative}
+  .arrow::after{content:"";position:absolute;bottom:-1px;left:-4px;border:5px solid transparent;border-top-color:var(--ink)}
+  /* ── 卡片网格 ── */
+  .grid{display:grid;gap:14px}
+  .g4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+  .g6{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+  .card{border:1px solid var(--line);background:#fff;border-radius:10px;padding:16px 18px}
+  .card h4{font-size:14px;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+  .card p{font-size:13px;color:var(--muted)}
+  .card .tag{
+    font-size:11px;background:var(--paper);border:1px solid var(--line);border-radius:5px;
+    padding:0 6px;color:var(--muted);white-space:nowrap
+  }
+  .card.hl{border-color:var(--accent);background:var(--accent-soft)}
+  /* ── 步骤条 ── */
+  .step{display:flex;gap:18px;margin-bottom:26px}
+  .step-rail{display:flex;flex-direction:column;align-items:center;flex:none;width:44px}
+  .step-dot{
+    width:38px;height:38px;border-radius:50%;background:var(--ink);color:#fff;
+    font-family:"Songti SC",serif;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:16px
+  }
+  .step-line{width:2px;flex:1;background:var(--line);margin-top:6px}
+  .step:last-child .step-line{display:none}
+  .step-body{flex:1;padding-bottom:6px}
+  .step-body>h3{margin-top:4px}
+  .panel{border:1px solid var(--line);background:#fff;border-radius:10px;padding:16px 20px;margin-top:10px}
+  /* ── 表格 ── */
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px;background:#fff}
+  th,td{border:1px solid var(--line);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:#f3f0ea;font-weight:600}
+  td code,p code,li code{background:#efece6;padding:1px 6px;border-radius:4px;font-size:12.5px}
+  /* ── 状态机 ── */
+  .state-flow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px;font-size:13px}
+  .st{padding:4px 14px;border-radius:99px;border:1.5px solid var(--ink);font-weight:600;background:#fff}
+  .st.done{background:var(--ok);border-color:var(--ok);color:#fff}
+  .st.partial{background:var(--warn-soft);border-color:var(--warn);color:var(--warn)}
+  .sa{color:var(--muted)}
+  /* ── 双分支 ── */
+  .branch{display:flex;gap:14px;margin-top:10px;flex-wrap:wrap}
+  .branch>div{flex:1;min-width:280px;border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#fff}
+  .branch h4{font-size:14px;margin-bottom:6px}
+  .branch p{font-size:13px;color:var(--muted)}
+  ul.tight{padding-left:20px;font-size:13.5px}
+  ul.tight li{margin:4px 0}
+  footer{margin-top:64px;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>zovii-xiaohongshu 完整生图流程</h1>
+  <p class="sub">飞书表格（每行一组小红书图片需求）→ 提示词自动生成 → zovii AI 生图 → 图片自动回填表格</p>
+  <div class="meta">版本 1.0.0 · 仓库 <a href="https://github.com/kulebbb/zovii-xiaohongshu">github.com/kulebbb/zovii-xiaohongshu</a> · 权威细节以 <code>SKILL.md</code> 为准 · 标记 <span class="badge-new">NEW</span> 为本轮优化点</div>
+</header>
+
+<!-- ═══════════ 全景总览 ═══════════ -->
+<h2>一、全景总览</h2>
+<p class="note">用户只需一句话触发，AI 按「检查 → 询问 → 执行」三段推进；执行段内部固定为六步。</p>
+
+<div class="pipeline">
+  <div class="pipe-node"><span class="pipe-num">话</span><div><b>用户一句话</b><br><span>「帮我用这个表格批量生成小红书图片：&lt;飞书表格链接&gt;」</span></div></div>
+  <div class="arrow"></div>
+  <div class="pipe-node"><span class="pipe-num">查</span><div><b>Layer 1 · 初始化检查</b> <span class="badge-new">NEW·自更新</span><br><span>skill 版本自检 → zovii CLI → 飞书 CLI → 双端登录态</span></div></div>
+  <div class="arrow"></div>
+  <div class="pipe-node"><span class="pipe-num">问</span><div><b>Layer 2 · 必问六项</b><br><span>表格 URL / 处理颗粒度 / zovii 项目 / 模型 / 图片比例 / 目录约定</span></div></div>
+  <div class="arrow"></div>
+  <div class="pipe-node"><span class="pipe-num">干</span><div><b>Layer 3 · 六步工作流</b><br><span>读表 → 加列 → 参考图进 tmp/ → 提示词回填 → zovii 生图 → 回填收尾+清理</span></div></div>
+  <div class="arrow"></div>
+  <div class="pipe-node"><span class="pipe-num">交</span><div><b>交付</b><br><span>飞书表格内：每格图片 + 提示词 + 状态 + 耗时，全程可追踪可续跑</span></div></div>
+</div>
+
+<!-- ═══════════ Layer 1 ═══════════ -->
+<h2>二、Layer 1 · 启动前检查<span style="font-size:13px;color:var(--muted);font-weight:normal">（每次运行必须按序执行）</span></h2>
+<div class="grid g4">
+  <div class="card hl"><h4>1.0 skill 自更新 <span class="badge-new">NEW</span></h4><p>运行 <code>check_update.py</code> 对比本地与 GitHub 远端 VERSION。有新版 → 询问后执行 <code>npx skills update zovii-xiaohongshu</code>；网络失败只警告、<b>绝不阻塞</b></p></div>
+  <div class="card"><h4>1.1 zovii CLI</h4><p><code>zovii --version</code> 对照 npm 最新版，落后则提示更新（用户不同意就继续）</p></div>
+  <div class="card"><h4>1.2 飞书 CLI</h4><p><code>lark-cli --version</code> 同样做版本核对与更新提示</p></div>
+  <div class="card"><h4>1.3 登录态</h4><p>zovii：<code>~/.config/zovii/auth.json</code> 含 access_token，缺失引导 <code>zovii login</code>；飞书报权限错按 lark-shared 处理</p></div>
+</div>
+
+<!-- ═══════════ Layer 2 ═══════════ -->
+<h2>三、Layer 2 · 必问信息<span style="font-size:13px;color:var(--muted);font-weight:normal">（AskUserQuestion，先问再干，不猜）</span></h2>
+<div class="grid g6">
+  <div class="card"><h4>① 飞书表格 URL</h4><p>优先从消息提取 feishu.cn/wiki/sheets 链接，没有才追问</p></div>
+  <div class="card"><h4>② 处理颗粒度</h4><p>全部行 / 指定行号 / 指定状态行 / 只跑新追加行</p></div>
+  <div class="card"><h4>③ zovii 项目</h4><p><code>list-projects</code> 让用户挑，没有合适就 <code>create-project</code> 新建</p></div>
+  <div class="card"><h4>④ 模型</h4><p>默认 doubao-seedream-5-0-pro，共 5 个候选供选</p></div>
+  <div class="card"><h4>⑤ 图片比例</h4><p>小红书默认 3:4，另备 1:1 / 4:5 / 9:16 等</p></div>
+  <div class="card hl"><h4>⑥ 本地目录约定</h4><p>参考图 → <code>tmp/</code> 临时区（结束即删）；生成图 → <code>xiaohongshu/&lt;日期&gt;/images/</code> 交付留存</p></div>
+</div>
+
+<!-- ═══════════ Layer 3 ═══════════ -->
+<h2>四、Layer 3 · 主工作流六步</h2>
+
+<div class="step"><div class="step-rail"><div class="step-dot">1</div><div class="step-line"></div></div>
+<div class="step-body">
+  <h3>读取表格 · 识别列结构</h3>
+  <div class="panel"><ul class="tight">
+    <li>wiki 链接先解析成 sheet token（走 lark-wiki）</li>
+    <li><code>+workbook-info</code> 拿子表 → <code>+csv-get</code> 读表头与样例</li>
+    <li>识别五类列：标题正文 / 图片数量 N / 拆解提示词 / 产品图 / 参考图列（可能带序号）</li>
+    <li><b>铁律：表头含义读出来逐列与用户核对，不按直觉猜</b></li>
+  </ul></div>
+</div></div>
+
+<div class="step"><div class="step-rail"><div class="step-dot">2</div><div class="step-line"></div></div>
+<div class="step-body">
+  <h3>自动加列</h3>
+  <div class="panel"><ul class="tight">
+    <li>按目标行最大图数 MAXN 追加：<code>图1~N提示词</code>、<code>图1~N图片</code>、<code>状态</code>（默认写「待处理」），运行期再自动补「耗时(秒)」</li>
+    <li>推荐脚本 <code>add_columns.py</code>：自动算列字母、避免维度错误，输出列映射</li>
+  </ul></div>
+</div></div>
+
+<div class="step"><div class="step-rail"><div class="step-dot">3</div><div class="step-line"></div></div>
+<div class="step-body">
+  <h3>准备参考图 —— 先下载到本地 tmp/，再上传给 zovii <span class="badge-new">NEW</span></h3>
+  <div class="panel">
+    <p>目标目录：<code>&lt;cwd&gt;/tmp/zovii-refs/&lt;任务ID&gt;/refs/&lt;行号&gt;/</code>（任务ID = 时间戳+进程号，多次运行互不干扰）。<code>--image-input</code> 只吃本地路径，所以必须先落地。</p>
+    <table>
+      <tr><th style="width:32%">单元格形态</th><th>处理方式</th></tr>
+      <tr><td>URL 文本</td><td><code>curl -L -o</code> 直接下载</td></tr>
+      <tr><td>单元格图片（embed-image）</td><td>取 image_token → medias/download；<b>--output 只接受相对路径</b>（先 cd 进目标目录），文件名不可预测必须显式指定</td></tr>
+      <tr><td>浮动图片</td><td><code>+float-image-list</code> 取 token 后下载</td></tr>
+      <tr><td>云盘/文档链接</td><td>走 lark-drive skill 下载</td></tr>
+    </table>
+    <ul class="tight">
+      <li>命名规范：<code>&lt;行号&gt;-&lt;类型&gt;-&lt;序号&gt;.jpg</code>（如 <code>3-产品图-1.jpg</code>），下载后维护「行号 → 路径」映射</li>
+      <li>是否使用参考图以<b>拆解提示词/正文的明示</b>为准，没明示就不下载不使用</li>
+    </ul>
+  </div>
+</div></div>
+
+<div class="step"><div class="step-rail"><div class="step-dot">4</div><div class="step-line"></div></div>
+<div class="step-body">
+  <h3>生成每张图的提示词并回填<span style="font-size:13px;color:var(--muted)">（核心智能环节）</span></h3>
+  <div class="panel">
+    <p><b>分工：</b>图 1 = 封面（吸睛主视觉、强对比、大字号标题、情绪钩子）；图 2~N = 配图（按拆解节奏展开场景 / 卖点细节 / 对比 / 步骤 / 证言 / 前后效果）。</p>
+    <p style="margin-top:8px"><b>每条提示词五段式：</b>① 主体与场景 → ② 画面内容（构图景别动作）→ ③ 风格氛围（光影色调质感）→ ④ 画面文字（具体字句与排版位置）→ ⑤ 参考图声明（仅限明示）→ 统一追加上画质后缀。</p>
+    <p style="margin-top:8px"><b>回填后该行状态置「提示词已生成」</b>；先给用户看几条样例确认风格，不满意调整后再批量——这是唯一的人工把关点。</p>
+  </div>
+</div></div>
+
+<div class="step"><div class="step-rail"><div class="step-dot">5</div><div class="step-line"></div></div>
+<div class="step-body">
+  <h3>zovii 生图 · 双层并发</h3>
+  <div class="branch">
+    <div>
+      <h4>行间：多行并发（默认 10 行）</h4>
+      <p><code>run_rows.py</code> 统一调度：main 串行预取所有输入防飞书限流 → 参考图串行下载进 tmp/ → worker 并发生成回填 → 限流自动退避重试</p>
+    </div>
+    <div>
+      <h4>行内：按依赖判断模式</h4>
+      <p>拆解词出现引用表述（作为参考图 / 以封面为基准 / 延续 / 锚点…）→ <b>sequential</b>：封面先行、封面 assetId 作配图风格锚点；明确独立或无表述 → <b>parallel</b>：全图并发（默认）</p>
+    </div>
+  </div>
+  <div class="panel">
+    <ul class="tight">
+      <li>只允许 <code>generate-image</code> 单图生成，禁止 batch-generate-image</li>
+      <li>单张失败自动重试，失败项带 error 记录、不中断后续，整批结束统一汇报（退出码 2）</li>
+      <li>脚本不可用时手动兜底：<code>generate-image &lt;project&gt; --prompt --image-input ... --model --aspect-ratio --size 2K</code></li>
+    </ul>
+  </div>
+</div></div>
+
+<div class="step"><div class="step-rail"><div class="step-dot">6</div><div class="step-line"></div></div>
+<div class="step-body">
+  <h3>下载回填 + 收尾清理 <span class="badge-new">NEW·清理</span></h3>
+  <div class="panel">
+    <ul class="tight">
+      <li><code>fillback_images.py</code> 下载资产并回填单元格图片；脚本内部自动 cd —— <b>回填路径铁律：--image 只接受当前目录相对路径，绝对路径必被拒</b></li>
+      <li>全部成功 → 状态「已完成」；有失败 → 「图片已生成」并在状态备注原因</li>
+      <li>所有行结束后删除整个参考图临时目录：<code>rm -rf tmp/zovii-refs/&lt;任务ID&gt;</code>（脚本内置 finally 兜底，成败都删；<code>--keep-tmp</code> 可调试保留）</li>
+    </ul>
+  </div>
+</div></div>
+
+<!-- ═══════════ 状态机 ═══════════ -->
+<h2>五、行状态机（中断可续跑）</h2>
+<p class="note">状态列贯穿全程；续跑时按状态跳过已完成行。</p>
+<div class="state-flow">
+  <span class="st">待处理</span><span class="sa">─ 提示词回填完 ─▶</span>
+  <span class="st">提示词已生成</span><span class="sa">─ 图片全部回填 ─▶</span>
+  <span class="st done">已完成</span>
+  <span style="width:100%"></span>
+  <span class="sa">└─ 存在失败图 ─▶</span><span class="st partial">图片已生成</span><span class="sa">（备注失败原因，修复后续跑）</span>
+</div>
+
+<!-- ═══════════ 文件去向 ═══════════ -->
+<h2>六、文件去向一览</h2>
+<div class="grid g3">
+  <div class="card"><h4>📄 飞书表格<span class="tag">最终交付</span></h4><p>图1~N提示词列、图1~N单元格图片、状态、耗时(秒) —— 一切成果沉淀在表格里</p></div>
+  <div class="card hl"><h4>🗑️ tmp/zovii-refs/&lt;任务ID&gt;/<span class="badge-new">NEW</span></h4><p>参考图临时区：任务开始下载进来，任务结束 finally 自动删除；超 3 天残留目录启动时清扫；--keep-tmp 仅调试用</p></div>
+  <div class="card"><h4>🖼️ xiaohongshu/&lt;日期&gt;/images/</h4><p>生成图本地副本（交付物留存），同时是回填飞书的工作目录（相对路径要求）</p></div>
+</div>
+
+<!-- ═══════════ 铁律 ═══════════ -->
+<h2>七、决策铁律速览</h2>
+<div class="panel">
+  <ol class="tight" style="padding-left:34px">
+    <li><b>先问再干</b>：颗粒度、模型、比例三问必须在开工前完成</li>
+    <li><b>只单图生成</b>：一律 generate-image，禁 batch</li>
+    <li><b>按依赖定锚点</b>：有图间依赖 → 封面锚定；无 → 行内并发</li>
+    <li><b>行间并发 10 行</b>，参考图按行隔离在 tmp/ 子目录</li>
+    <li><b>列名不猜</b>：读出来核对一次</li>
+    <li><b>状态可追踪</b>：中断续跑按状态跳过已完成行</li>
+    <li><b>失败不静默</b>：记录原因，最后统一汇报清单</li>
+    <li><b>回填相对路径</b>：cd 进图片目录再用 ./xxx.png</li>
+    <li><b>默认并发</b>：无依赖表述即 parallel</li>
+    <li><b>参考图临时化 <span class="badge-new">NEW</span></b>：先落 tmp/ 再上传，任务结束必删；生成图是交付物不在此列</li>
+  </ol>
+</div>
+
+<footer>
+  本文为流程梳理文档，操作级细节以仓库内 SKILL.md 与 scripts/ 为准。<br>
+  仓库：<a href="https://github.com/kulebbb/zovii-xiaohongshu">kulebbb/zovii-xiaohongshu</a> · 安装：把「帮我安装小红书批量生图 skill：&lt;仓库地址&gt;」发给你的 AI 即可。
+</footer>
+
+</div>
+</body>
+</html>
