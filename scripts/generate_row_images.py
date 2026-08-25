@@ -10,7 +10,8 @@
         --prompts <file> --mode <sequential|parallel> \
         [--cover-ref <本地路径>] \
         [--refs "1:路径A,路径B;2:路径C"] \
-        [--size 2K] [--timeout 300] [--retry 1]
+        [--size 2K] [--timeout 300] [--retry 1] \
+        [--manifest <path>]
 
 参数:
     --prompts   提示词文件，每行一条（第 1 行 = 图1）
@@ -18,16 +19,76 @@
     --cover-ref 封面参考图（本地路径/assetId；多张用 --refs "1:路径A,路径B"）
     --refs      各图参考图，格式 "图号:路径[,路径...];图号:路径..."（图1的参考图即封面参考图）
     --retry     单张失败重试次数（默认 1）
+    --manifest  断点续跑清单（JSONL）：每张完成立即追加 {n,status,assetId,...}；
+                启动时读取，已完成图号直接复用 assetId 跳过生成（不重复消耗 credit）
 
 输出: JSON [{"n":1,"status":"completed","assetId":"...","fileUrl":"..."}, ...]
      失败项 status="failed" 并带 error 字段（不中断后续）；有失败退出码 2
+
+参考图风格锁定（重要）:
+     凡带参考图的图，提示词前自动注入 STYLE_LOCK 引导句。复盘教训：ws-gpt-image-2
+     对 --image-input 默认语义是弱视觉参考，提示词不显式要求「遵循参考图风格」时，
+     模型会跑向领域先验模板（实测相似度仅 5%~8%）；显式锚定后 ~93%。
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+STYLE_LOCK = ("严格遵循所提供参考图的视觉风格与关键元素："
+              "画风媒介、主色配色、构图、字体、装饰元素均与参考图保持一致。")
+
+_manifest_lock = threading.Lock()
+
+
+def load_manifest(path):
+    """读断点清单 → {n: item}；半行/坏行忽略（异常中断残留不致命）"""
+    done = {}
+    if not path or not os.path.exists(path):
+        return done
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if r.get("status") == "completed" and r.get("assetId"):
+                    done[r["n"]] = r
+    except OSError:
+        pass
+    return done
+
+
+def append_manifest(path, item):
+    """每张完成立即落盘；写失败只告警（退化为无断点，不影响主流程）。
+    追加前若文件末尾不是换行（上次写一半崩溃的残行），先补换行，
+    避免本次记录被拼进坏行而丢失。"""
+    if not path:
+        return
+    try:
+        with _manifest_lock:
+            needs_nl = False
+            try:
+                if os.path.exists(path) and os.path.getsize(path):
+                    with open(path, "rb") as f:
+                        f.seek(-1, os.SEEK_END)
+                        needs_nl = f.read(1) != b"\n"
+            except OSError:
+                pass
+            with open(path, "a", encoding="utf-8") as f:
+                if needs_nl:
+                    f.write("\n")
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    except OSError as e:
+        sys.stderr.write(f"[manifest] 写入失败（忽略，退化为无断点）: {e}\n")
 
 
 def zovii(args):
@@ -55,6 +116,8 @@ def parse_refs(spec):
 
 def gen_one(project, prompt, image_input, model, ratio, size, timeout, retry):
     """生成单张图，失败重试；返回 zovii item dict（含 status/assetId/fileUrl）"""
+    if image_input:
+        prompt = f"{STYLE_LOCK}{prompt}"  # 传图≠风格锁定：显式锚定参考图风格
     last_err = None
     for attempt in range(retry + 1):
         try:
@@ -91,6 +154,8 @@ def main():
     ap.add_argument("--size", default="2K")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--retry", type=int, default=1)
+    ap.add_argument("--manifest", default=None,
+                    help="断点续跑清单（JSONL）；已完成图号复用 assetId 跳过生成")
     a = ap.parse_args()
 
     with open(a.prompts, encoding="utf-8") as f:
@@ -99,12 +164,23 @@ def main():
         sys.stderr.write("prompts 文件为空\n")
         sys.exit(1)
     extra_refs = parse_refs(a.refs)
+    done = load_manifest(a.manifest)
+    if done:
+        sys.stderr.write(f"[manifest] 断点续跑：已完成的图号 "
+                         f"{sorted(done)} 将直接复用，不重复生成\n")
     results = []
 
     def run_job(n, prompt, image_input):
+        if n in done:
+            r = dict(done[n])
+            r["n"] = n
+            r["resumed"] = True
+            return r
         r = gen_one(a.project, prompt, image_input, a.model, a.ratio, a.size,
                     a.timeout, a.retry)
         r["n"] = n
+        if r.get("status") == "completed":
+            append_manifest(a.manifest, r)  # 生成即落盘，中断不丢 assetId
         return r
 
     if a.mode == "parallel":

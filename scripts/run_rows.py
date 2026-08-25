@@ -16,6 +16,11 @@
 每行流程:
     行锚点校验（防错行）→ 生成图片（行内按模式并发）→ 下载回填单元格图片 → 更新状态+耗时列
 
+断点续跑:
+    每张图生成完成立即写入 <out>/manifest-row<N>.jsonl（图号+assetId）；
+    异常中断后用同一 --out 重跑，已完成的图直接复用 assetId，只补下载回填，
+    不重复消耗生成 credit。
+
 行锚点校验（防错行，重要）:
     预取阶段对每行用绝对行号直读「图片数量」单元格，与 csv-get 批量映射值比对；
     不一致 = 行号映射疑似错位 → 该行立即判失败并跳过，不生成、不回填、不写状态，
@@ -131,9 +136,10 @@ def run_cli(cmd, cwd=None, retries=4):
 
 
 def csv_get(url, sid, rng):
-    return json.loads(run_cli(["lark-cli", "sheets", "+csv-get",
+    # lark-cli >=1.0.89 移除了 +csv-get --rows-json，统一改用 cells-get
+    return json.loads(run_cli(["lark-cli", "sheets", "+cells-get",
                                "--url", url, "--sheet-id", sid,
-                               "--range", rng, "--as", "user", "--rows-json"]))
+                               "--range", rng, "--as", "user", "--include", "value"]))
 
 
 def cells_get(url, sid, rng, include="value,rich_text"):
@@ -168,13 +174,25 @@ def col_index(letter):
 
 
 def rows_matrix(d, ncols):
-    """csv-get rows-json → {row_number: [col1..colN]}（按字母序）"""
+    """cells-get → {row_number: [col1..colN]}（按列字母序）"""
     result = {}
-    for r in d.get("data", {}).get("rows", []):
-        vals = r.get("values", {})
+    ranges = d.get("data", {}).get("ranges", [])
+    if not ranges:
+        return result
+    r0 = ranges[0]
+    row_indices = r0.get("row_indices", [])
+    col_indices = r0.get("col_indices", [])
+    cells = r0.get("cells", [])
+    for ri, rn in enumerate(row_indices):
+        vals = {}
+        row_cells = cells[ri] if ri < len(cells) else []
+        for ci, letter in enumerate(col_indices):
+            cell = row_cells[ci] if ci < len(row_cells) else {}
+            v = cell.get("value")
+            vals[letter] = "" if v is None else str(v)
         keys = sorted(vals.keys(), key=col_index)
-        cells = [vals[k] for k in keys]
-        result[r["row_number"]] = cells + [""] * (ncols - len(cells))
+        row_vals = [vals[k] for k in keys]
+        result[rn] = row_vals + [""] * (ncols - len(row_vals))
     return result
 
 
@@ -276,7 +294,9 @@ def process_row(row, inp, url, sid, project, model, ratio, size, timeout,
         cmd = [sys.executable, os.path.join(SCRIPT_DIR, "generate_row_images.py"),
                "--project", project, "--model", model, "--ratio", ratio,
                "--prompts", pf, "--mode", mode,
-               "--size", size, "--timeout", str(timeout), "--retry", str(retry)]
+               "--size", size, "--timeout", str(timeout), "--retry", str(retry),
+               # 断点续跑：manifest 随交付物目录落盘，重跑同一 --out 自动跳过已完成
+               "--manifest", os.path.join(out_root, f"manifest-row{row}.jsonl")]
         refs_arg = ";".join(f"{k}:{','.join(v)}" for k, v in ref_map.items())
         if refs_arg:
             cmd += ["--refs", refs_arg]
@@ -294,7 +314,7 @@ def process_row(row, inp, url, sid, project, model, ratio, size, timeout,
             run_cli([sys.executable, os.path.join(SCRIPT_DIR, "fillback_images.py"),
                      "--url", url, "--sheet-id", sid, "--row", str(row),
                      "--start-col", icol, "--assets", assets,
-                     "--out", os.path.join(out_root, "images")])
+                     "--out", out_root])  # --out 即图片最终目录，不再嵌套 images
 
         # 3. 状态 + 耗时
         failed = [im["n"] for im in images if im.get("status") != "completed"]
@@ -333,7 +353,9 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--ratio", required=True)
     ap.add_argument("--max-workers", type=int, default=10)
-    ap.add_argument("--out", default=None, help="生成图（交付物）输出目录")
+    ap.add_argument("--out", default=None,
+                    help="生成图（交付物）输出目录，图片直接落在此目录"
+                         "（断点清单 manifest-rowN.jsonl 也在同一目录）")
     ap.add_argument("--tmp-dir", default=None,
                     help="参考图临时目录，默认 <cwd>/tmp/zovii-refs/<任务ID>/，任务结束自动删除")
     ap.add_argument("--keep-tmp", action="store_true",
