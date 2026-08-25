@@ -108,6 +108,13 @@ def assign_ref_images(ref_paths_by_name, decompose_text, n):
         targets = declared.get(name)
         if targets is None and "封面" in name:
             targets = {1}
+        elif targets is None:
+            # 产品图/其他参考图N 未在拆图提示词显式声明 → 跳过，但打出提醒，
+            # 避免用户以为「没传」是脚本遗漏（规则正确，仅补透明）。
+            sys.stderr.write(
+                f"[refs] 提示: 参考图「{name}」检测到 {len(paths)} 张图片，"
+                f"但拆图提示词未声明用于哪张图，按规则未附加；"
+                f"如需使用请在拆图提示词写明「{name}用于图片X」。\n")
         for t in sorted(targets or ()):
             if not 1 <= t <= n:
                 sys.stderr.write(f"[refs] 警告: 参考图「{name}」声明的图{t} "
@@ -155,6 +162,22 @@ def find_header_cols(url, sid):
     cols = d["data"]["ranges"][0]["col_indices"]
     return {str(c.get("value")): letter
             for letter, c in zip(cols, cells) if c.get("value") not in (None, "")}
+
+
+def require_exact(headers, name, hint=""):
+    """必需列必须能从表头精确读出；缺失/改名/带空格差异则响亮报错退出。
+
+    find_header_cols 按表头精确匹配返回 {列名: 列字母}。若某必需列名读不到，
+    绝不静默落到硬编码默认列（如「图1图片」默认 M，实际可能错位——图1图片
+    在 L 列时默认 M 会把图片写进图2图片列），而是打印当前识别到的全部列名，
+    让使用方核对表头后再继续。
+    """
+    letter = headers.get(name)
+    if not letter:
+        detected = ", ".join(sorted(headers)) or "(空表头)"
+        sys.exit(f"[headers] 缺少必需列「{name}」{hint}；"
+                 f"当前识别到的列名: {detected}。请核对表头后重试。")
+    return letter
 
 
 def col_letter(idx):
@@ -332,8 +355,9 @@ def process_row(row, inp, url, sid, project, model, ratio, size, timeout,
                 "elapsed": int(time.time() - t0)}
 
 
-def ensure_time_col(url, sid, headers):
-    scol = headers.get("状态", "Q")
+def ensure_time_col(url, sid, headers, scol):
+    """「耗时(秒)」列 = 状态列后一列；表头缺失该列名时自动补写。
+    scol 由调用方校验后传入，此处不再内部猜默认值。"""
     tcol = col_letter(col_index(scol) + 1)
     if "耗时(秒)" not in headers:
         run_cli(["lark-cli", "sheets", "+cells-set",
@@ -384,12 +408,12 @@ def main():
     try:
         # ===== 串行预取（避免并发读表格触发限流），参考图下载进 tmp/ =====
         headers = find_header_cols(a.url, a.sheet_id)
-        tcol = ensure_time_col(a.url, a.sheet_id, headers)
-        ncol = headers.get("图片数量", "E")
-        dcol = headers.get("拆图提示词", "D")
-        pcol = headers.get("图1提示词", "I")
-        icol = headers.get("图1图片", "M")
-        scol = headers.get("状态", "Q")
+        ncol = require_exact(headers, "图片数量", "(用于读每行图数、锚点校验)")
+        dcol = require_exact(headers, "拆图提示词", "(用于判行内模式)")
+        pcol = require_exact(headers, "图1提示词", "(提示词起始列)")
+        icol = require_exact(headers, "图1图片", "(回填起始列)")
+        scol = require_exact(headers, "状态", "(状态列)")
+        tcol = ensure_time_col(a.url, a.sheet_id, headers, scol)
 
         # 图片数量 / 拆图提示词（批量读列）
         n_map = rows_matrix(csv_get(a.url, a.sheet_id, f"{ncol}{rmin}:{ncol}{rmax}"), 1)
