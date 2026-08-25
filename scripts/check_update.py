@@ -2,11 +2,14 @@
 """skill 自更新检查：对比本地 VERSION 与 GitHub 远端 VERSION。
 
 用法:
-    python3 check_update.py [--repo kulebbb/zovii-xiaohongshu] [--timeout 5]
+    python3 check_update.py [--repo kulebbb/zovii-xiaohongshu] [--timeout 10]
 
 行为:
     - 读本 skill 根目录的 VERSION 作为本地版本
-    - 请求 raw.githubusercontent.com/<repo>/main/VERSION 作为最新版本
+    - 依次尝试三个源获取远端 VERSION（前一个失败才试下一个）:
+      1. raw.githubusercontent.com（权威源，实时）
+      2. fastly.jsdelivr.net（CDN 回退，国内通常可达，缓存可能滞后 ≤12h）
+      3. cdn.jsdelivr.net（CDN 回退，同上）
     - 网络失败 / 文件缺失 → 警告写入 stderr，退出码 0（绝不阻塞主流程）
 
 输出(JSON，stdout):
@@ -25,6 +28,12 @@ DEFAULT_REPO = "kulebbb/zovii-xiaohongshu"
 SKILL_NAME = "zovii-xiaohongshu"
 BRANCH = "main"
 
+SOURCES = [
+    "https://raw.githubusercontent.com/{repo}/{branch}/VERSION",
+    "https://fastly.jsdelivr.net/gh/{repo}@{branch}/VERSION",
+    "https://cdn.jsdelivr.net/gh/{repo}@{branch}/VERSION",
+]
+
 
 def read_local_version(skill_root):
     try:
@@ -35,17 +44,29 @@ def read_local_version(skill_root):
 
 
 def fetch_latest(repo, timeout):
-    url = f"https://raw.githubusercontent.com/{repo}/{BRANCH}/VERSION"
-    req = urllib.request.Request(
-        url, headers={"User-Agent": f"{SKILL_NAME}-update-check"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8").strip()
+    """依次尝试 SOURCES，任一成功即返回 (version, host)；全失败抛 RuntimeError"""
+    errs = []
+    for tpl in SOURCES:
+        url = tpl.format(repo=repo, branch=BRANCH)
+        host = url.split("/")[2]
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": f"{SKILL_NAME}-update-check"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                v = resp.read().decode("utf-8").strip()
+            if v:
+                return v, host
+            errs.append(f"{host}: 空响应")
+        except Exception as e:
+            errs.append(f"{host}: {e}")
+    raise RuntimeError("；".join(errs))
 
 
 def main():
     ap = argparse.ArgumentParser(description="skill 自更新检查")
     ap.add_argument("--repo", default=DEFAULT_REPO, help="GitHub 仓库 owner/repo")
-    ap.add_argument("--timeout", type=float, default=5, help="网络超时秒数")
+    ap.add_argument("--timeout", type=float, default=10,
+                    help="单源网络超时秒数（默认 10）")
     a = ap.parse_args()
 
     # 兼容软链安装（npx skills 默认 symlink）：__file__ 所在目录即 skill 根
@@ -61,12 +82,15 @@ def main():
         return
 
     try:
-        latest = fetch_latest(a.repo, a.timeout)
-    except Exception as e:  # 网络不通等任何异常都不阻塞主流程
+        latest, host = fetch_latest(a.repo, a.timeout)
+    except Exception as e:  # 所有源都不通等任何异常都不阻塞主流程
         sys.stderr.write(f"[update-check] 检查失败（忽略，继续执行）: {e}\n")
         print(json.dumps(result, ensure_ascii=False))
         return
 
+    if host != SOURCES[0].split("/")[2]:
+        sys.stderr.write(f"[update-check] 主源不可达，经回退源 {host} 完成检测"
+                         f"（CDN 缓存可能滞后 ≤12h）\n")
     result["latest"] = latest
     if latest and latest != current:
         result["update_available"] = True

@@ -52,6 +52,8 @@ python3 <skill>/scripts/check_update.py
 ```
 - 输出 `"update_available": true`（退出码 1）→ 告知用户有新版本，询问是否更新；同意 → 执行 `npx skills update zovii-xiaohongshu` 后继续；拒绝 → 继续
 - 输出 `false` 或网络失败（stderr 有警告）→ **不阻塞，直接继续**
+- 检测内置三源回退（GitHub raw → fastly.jsdelivr → cdn.jsdelivr），弱网下单源超时会自动换源重试
+- ⚠️ 更新命令 `npx skills update` 本身也可能因网络失败：**失败后重试一次**；仍失败 → 告知用户检查网络/代理，稍后手动执行（clone 安装的用户改用 `git pull`），然后继续当前任务
 
 ### 1.1 zovii CLI
 ```bash
@@ -262,7 +264,7 @@ lark-cli sheets +cells-set-image --url "<URL>" --sheet-name "<sheet>" \
 
 | 脚本 | 职责 | 关键参数 |
 |---|---|---|
-| `check_update.py` | skill 自更新检查（本地 VERSION vs GitHub 远端） | `[--repo] [--timeout]`，退出码 1=有新版 |
+| `check_update.py` | skill 自更新检查（本地 VERSION vs GitHub 远端，**三源回退**：raw → fastly.jsdelivr → cdn.jsdelivr） | `[--repo] [--timeout]`（单源超时，默认 10s），退出码 1=有新版 |
 | `add_columns.py` | 自动追加图1~N提示词/图片/状态列并初始化状态 | `--url --sheet-id --max-n --row [--dry-run]` |
 | `read_cell.py` | 读单元格纯文本（供取提示词） | `--url --sheet-id --range` |
 | `generate_row_images.py` | 单行生成，**默认 sequential**（封面先行→assetId 锚定配图；parallel 仅显式传入时生效），带重试；带参考图的图自动注入风格锁定句；**manifest 断点续跑**（`[--manifest]`，每张完成即落盘、重跑复用 assetId） | `--project --model --ratio --prompts [--mode] [--refs] [--cover-ref] [--manifest]` |
