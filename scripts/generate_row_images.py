@@ -25,10 +25,12 @@
 输出: JSON [{"n":1,"status":"completed","assetId":"...","fileUrl":"..."}, ...]
      失败项 status="failed" 并带 error 字段（不中断后续）；有失败退出码 2
 
-参考图风格锁定（重要）:
-     凡带参考图的图，提示词前自动注入 STYLE_LOCK 引导句。复盘教训：ws-gpt-image-2
-     对 --image-input 默认语义是弱视觉参考，提示词不显式要求「遵循参考图风格」时，
-     模型会跑向领域先验模板（实测相似度仅 5%~8%）；显式锚定后 ~93%。
+双重锁定（重要）:
+     ① 所有图自动前置 TEXT_LOCK（文字强约束）：模型有「自动补全内容」倾向，
+        不约束会编造提示词以外的文字/列表（08-25 复盘：封面被加 7 条虚构症状）。
+     ② 带参考图的图再前置 STYLE_LOCK（风格锁定）：ws-gpt-image-2 对 --image-input
+        默认语义是弱视觉参考，提示词不显式要求「遵循参考图风格」时，模型会跑向
+        领域先验模板（实测相似度仅 5%~8%）；显式锚定后 ~93%。
 """
 import argparse
 import json
@@ -41,6 +43,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 STYLE_LOCK = ("严格遵循所提供参考图的视觉风格与关键元素："
               "画风媒介、主色配色、构图、字体、装饰元素均与参考图保持一致。")
+
+# 文字强约束：GPT Image 2 有「自动补全内容」倾向，不加约束会自由发挥，
+# 编造提示词以外的文字/列表（08-25 复盘：封面被加了 7 条虚构症状清单）
+TEXT_LOCK = ("画面中所有文字必须严格使用提示词中提供的文字，"
+             "禁止自行添加提示词以外的文字、列表、标签或说明。")
 
 _manifest_lock = threading.Lock()
 
@@ -116,6 +123,7 @@ def parse_refs(spec):
 
 def gen_one(project, prompt, image_input, model, ratio, size, timeout, retry):
     """生成单张图，失败重试；返回 zovii item dict（含 status/assetId/fileUrl）"""
+    prompt = f"{TEXT_LOCK}{prompt}"  # 文字强约束：只画提示词给定的文字
     if image_input:
         prompt = f"{STYLE_LOCK}{prompt}"  # 传图≠风格锁定：显式锚定参考图风格
     last_err = None
