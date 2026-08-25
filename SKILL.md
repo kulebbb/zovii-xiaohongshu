@@ -35,6 +35,13 @@ description: 基于飞书表格批量生成小红书图片组。读取飞书表�
 
 > 解析规则：按「参考图列名 + 图号同句」精确识别——第 3 条是标准声明写法；第 4 条「产品参考图还原」不含精确列名「产品图」，不会被误识别；第 5 条「图片3为产品页」也不会自动关联产品图。除封面锚点外的一切都由拆图提示词显式驱动。
 
+## 执行守则（三条铁律，来自实战复盘）
+
+1. **先看参考图，再写提示词**：写含参考图的提示词前，必须先下载并查看参考图，按真实画风提炼特征清单；提示词用**三层锚点**——① 显式要求「严格遵循参考图视觉风格」② 逐条列出画风/配色/构图/字体/装饰元素 ③ 反向排除与参考图冲突的画风。凭刻板印象写的风格词若与参考图相反，等于把模型往反方向推（实测：裸传参考图相似度仅 5%~8%，三层锚定后 ~93%）。
+   > 第一层脚本已内置：`generate_row_images.py` 对所有带参考图的图自动在提示词前注入风格锁定句（STYLE_LOCK）；手动调 `zovii generate-image` 时必须自己写全三层。
+2. **批量前先出样图**：正式批量前先生成 1 张样图给用户确认，认可后再放量。
+3. **CLI 升级后先小样本试跑**：lark-cli / zovii 升级可能删除或改名参数导致脚本接口断裂；升级后先用 1 行数据完整试跑再批量。
+
 ---
 
 ## Layer 1 — 初始化检查（每次使用前必须执行，按顺序）
@@ -87,7 +94,7 @@ which lark-cli && lark-cli --version
    - 小红书封面/配图默认 `3:4`；选项：`1:1` / `3:4` / `4:5` / `2:3` / `9:16` / `4:3` / `16:9`
 6. **本地工作目录**
    - 参考图（**临时文件**）：`<cwd>/tmp/zovii-refs/<任务ID>/refs/<行号>/`，任务结束必须删除
-   - 生成图（交付物）：默认 `<cwd>/xiaohongshu/<YYYY-MM-DD>/images/`
+   - 生成图（交付物）：`--out` 即图片最终所在目录，**不嵌套子目录**；`run_rows` 默认 `<cwd>/xiaohongshu/<YYYY-MM-DD>/<行号列表>/`（断点清单 `manifest-rowN.jsonl` 也在同一目录）
 
 ---
 
@@ -193,6 +200,7 @@ lark-cli sheets +csv-get --url "<URL>" --sheet-name "<sheet>" --range "A1:Z10"  
 >   [--max-workers 10] [--out <dir>] [--dry-run]
 > ```
 > 每行流程：读图片数量/拆图提示词/各图提示词（列由表头自动定位）→ `judge_mode` 判行内模式（默认 sequential，仅显式整组独立才 parallel）→ 下载参考图到 **tmp 临时目录** `tmp/zovii-refs/<任务ID>/refs/<行>/`（单元格图片/URL），并按「拆图提示词声明 > 列类型默认」分配到图号：封面参考图→图1；产品图/其他参考图N 仅在拆图提示词显式声明时附加到对应图号，未声明不猜测 → 调 `generate_row_images` → 调 `fillback_images` 回填 → 更新状态列 → **任务结束自动删除参考图临时目录（成败都删，`--keep-tmp` 调试保留）**。**自动维护「耗时(秒)」列**（状态列后一列，表头缺失时自动添加）：记录每行完整流程耗时。输出按行号排序 JSON（含 `elapsed` 字段），失败行退出码 2；清理信息走 stderr 不污染 JSON。
+> 🔁 **断点续跑**：每张图生成完成立即写入 `<out>/manifest-row<N>.jsonl`（图号+assetId）；异常中断后用**同一 `--out`** 重跑，已完成图号自动复用 assetId 跳过生成、只补下载回填，不重复消耗 credit。
 > ⚠️ **并发稳定性**：① `main` 串行预取所有行输入（表头/数量/提示词矩阵/参考图），worker 不重复读表头，避免多行并发读表格触发飞书限流（`99991400`）；② 参考图下载串行化到预取阶段；③ `run_cli` 遇限流自动退避重试；④ 参考图下载 `--output` 用相对路径 + 每行独立 `refs/<行号>/` 目录 + token 前缀唯一文件名。
 
 **手动执行（脚本不可用时兜底）**：
@@ -225,9 +233,9 @@ zovii generate-image <projectId> \
 > python3 <skill>/scripts/fillback_images.py --url "<URL>" --sheet-id "<SID>" --row <行号> \
 >   --start-col <图1图片列字母> \
 >   --assets "<assetId1>:图1-封面.png;<assetId2>:图2.png;..." \
->   --out <out>/images
+>   --out <out>
 > ```
-> `--assets` 顺序 = 回填列顺序（M→图1, N→图2 ...）；脚本自动 `cd` 后以相对路径回填；输出每张 localPath + filled 状态，有失败返回退出码 2。
+> `--assets` 顺序 = 回填列顺序（M→图1, N→图2 ...）；`--out` 即图片最终所在目录；脚本自动 `cd` 后以相对路径回填；输出每张 localPath + filled 状态，有失败返回退出码 2。
 
 **手动执行（脚本不可用时兜底）**：
 
@@ -257,9 +265,9 @@ lark-cli sheets +cells-set-image --url "<URL>" --sheet-name "<sheet>" \
 | `check_update.py` | skill 自更新检查（本地 VERSION vs GitHub 远端） | `[--repo] [--timeout]`，退出码 1=有新版 |
 | `add_columns.py` | 自动追加图1~N提示词/图片/状态列并初始化状态 | `--url --sheet-id --max-n --row [--dry-run]` |
 | `read_cell.py` | 读单元格纯文本（供取提示词） | `--url --sheet-id --range` |
-| `generate_row_images.py` | 单行生成，**默认 sequential**（封面先行→assetId 锚定配图；parallel 仅显式传入时生效），带重试 | `--project --model --ratio --prompts [--mode] [--refs] [--cover-ref]` |
+| `generate_row_images.py` | 单行生成，**默认 sequential**（封面先行→assetId 锚定配图；parallel 仅显式传入时生效），带重试；带参考图的图自动注入风格锁定句；**manifest 断点续跑**（`[--manifest]`，每张完成即落盘、重跑复用 assetId） | `--project --model --ratio --prompts [--mode] [--refs] [--cover-ref] [--manifest]` |
 | `fillback_images.py` | 下载资产 + 回填单元格图片（自动处理相对路径）+ **读回验证落格** | `--url --sheet-id --row --start-col --assets --out [--dry-run]` |
-| `run_rows.py` | **行间并发调度**（默认10行）：每行自动锚点校验/读输入/判模式（默认 sequential）/按声明分配参考图/生成/回填/状态 | `--url --sheet-id --rows --project --model --ratio [--max-workers] [--out] [--dry-run]` |
+| `run_rows.py` | **行间并发调度**（默认10行）：每行自动锚点校验/读输入/判模式（默认 sequential）/按声明分配参考图/生成（内置断点续跑）/回填/状态 | `--url --sheet-id --rows --project --model --ratio [--max-workers] [--out] [--dry-run]` |
 
 通用约定：所有脚本走 `--as user`；`<skill>` 指本 skill 安装目录（未安装时用项目路径）；脚本只读/写飞书表格与 zovii 资产，不执行其它副作用。
 
@@ -272,12 +280,13 @@ lark-cli sheets +cells-set-image --url "<URL>" --sheet-name "<sheet>" \
 3. **默认 sequential，封面必为配图锚点**：封面先生成、assetId 作全部配图风格锚点；仅拆图提示词显式写「每张图独立/各图互不相关」类整组独立声明才回退全图并发（无锚点）
 4. **行间并发**：多行独立同时处理，默认并发 10 行（`--max-workers` 可调）；参考图下载按行隔离目录
 5. **识别列不猜**：表头含义必须读出来后核对，不按直觉猜列名
-6. **状态可追踪**：每行状态列全程维护，中断可续跑（续跑时按状态跳过已完成行）
+6. **状态可追踪、中断真可续跑**：每行状态列全程维护；每张图完成即落盘 `manifest-rowN.jsonl`，重跑同一 `--out` 自动复用已完成 assetId（只补下载回填），不再整批重做
 7. **失败不静默**：单张失败记录原因，整批结束统一汇报失败清单
 8. **回填用相对路径**：`+cells-set-image` 的 `--image` 只接受当前目录内相对路径，先 `cd` 到图片目录再回填
 9. **参考图按列类型 + 声明分配到图号，未声明不猜测**：封面参考图默认给图 1；产品图/其他参考图N 用在哪张图由拆图提示词显式声明（参考图列名与目标图号同句），未声明则不参与任何图的生成
 10. **参考图临时化**：参考图先下载到 `tmp/zovii-refs/<任务ID>/` 再上传 zovii；任务结束（无论成败）必删该目录（脚本已内置 finally 清理）；生成图是交付物不在此列
 11. **写入前验锚、写入后读回**：`run_rows` 预取时对每行做锚点校验（绝对寻址直读 vs 批量映射值，不一致=行号错位→该行响亮失败、零写入）；`fillback` 每张回填后读回确认 embed 落格。任何校验不过立即报错，绝不静默错装
+12. **传图≠风格锁定**：带参考图的图必须显式锚定参考图风格——脚本已自动注入 STYLE_LOCK；手动生成时提示词需三层锚点（显式遵循句 + 风格特征清单 + 反向排除冲突画风），且写词前必须先看参考图
 
 ---
 
