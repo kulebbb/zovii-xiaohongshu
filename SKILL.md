@@ -52,6 +52,7 @@ description: 基于飞书表格批量生成小红书图片组。读取飞书表�
 python3 <skill>/scripts/check_update.py
 ```
 - 输出 `"update_available": true`（退出码 1）→ **自动执行更新**，不再询问用户：`npx skills update zovii-xiaohongshu`（clone 安装的用户改用 `git pull`）；更新完成后**向用户报告版本变化（X→Y）并 `cat <skill>/VERSION` 复核更新已落地**，再继续任务。⚠️ 更新命令失败 → **重试一次**；仍失败 → **停下并明确告知用户**检查网络/代理后稍后手动执行，**不要静默继续**（更新未落地会带着旧版本跑）。
+- ⚠️ **更新生效条件**：更新只改磁盘文件，**已运行会话的上下文里仍是旧版规则**——更新完成后必须提醒用户：**重启 Agent 客户端（或开新会话）后新版本才生效**。
 - 输出 `false` 或网络失败（stderr 有警告）→ **不阻塞，直接继续**（无法判断是否有新版时，不强行更新）
 - 检测内置三源回退（GitHub raw → fastly.jsdelivr → cdn.jsdelivr），弱网下单源超时会自动换源重试
 
