@@ -16,8 +16,8 @@
 参数:
     --prompts   提示词文件，每行一条（第 1 行 = 图1）
     --mode       sequential(默认) / parallel；auto 时由调用方先判断再传入
-    --cover-ref 封面参考图（本地路径/assetId；多张用 --refs "1:路径A,路径B"）
-    --refs      各图参考图，格式 "图号:路径[,路径...];图号:路径..."（图1的参考图即封面参考图）
+    --cover-ref 封面用参考图（本地路径/assetId；一般经 --refs "1:路径" 由声明驱动）
+    --refs      各图参考图，格式 "图号:路径[,路径...];图号:路径..."（只挂拆图提示词声明过的参考图）
     --retry     单张失败重试次数（默认 1）
     --manifest  断点续跑清单（JSONL）：每张完成立即追加 {n,status,assetId,...}；
                 启动时读取，已完成图号直接复用 assetId 跳过生成（不重复消耗 credit）
@@ -157,7 +157,7 @@ def main():
     ap.add_argument("--ratio", required=True, help="如 3:4")
     ap.add_argument("--prompts", required=True, help="提示词文件，每行一条")
     ap.add_argument("--mode", choices=["sequential", "parallel"], default="sequential")
-    ap.add_argument("--cover-ref", default=None, help="封面参考图（本地路径或 assetId）")
+    ap.add_argument("--cover-ref", default=None, help="图1用参考图（本地路径或 assetId；一般用 --refs 声明驱动）")
     ap.add_argument("--refs", default=None, help='各图参考图，如 "1:a,b;2:c"')
     ap.add_argument("--size", default="2K")
     ap.add_argument("--timeout", type=int, default=300)

@@ -67,8 +67,8 @@ def parse_ref_assignments(decompose_text, ref_names):
     """从拆图提示词解析 参考图→图号 显式映射。
 
     规则：参考图列名与目标图号出现在同一子句才算声明，
-    如「产品图仅用于图片3」「其他参考图1用于图片2」。
-    「产品参考图还原」「为产品页」等不含精确列名的表述不会被误识别。
+    如「参考图1用于图片1」「参考图2仅用于图片3」。
+    「严格按照参考图2还原」等不含图号的子句不会被误识别。
     返回 {列名: set(图号)}；未声明的参考图不在结果中（未声明不猜测）。
     """
     declared = {}
@@ -93,11 +93,10 @@ def parse_ref_assignments(decompose_text, ref_names):
 
 
 def assign_ref_images(ref_paths_by_name, decompose_text, n):
-    """按 显式声明 > 列类型默认 把参考图分配到图号。
+    """全显式分配：参考图无类别之分，用在哪张图完全由拆图提示词声明。
 
-    - 任意列名：拆图提示词显式声明 → 按声明分配（可多个图号）
-    - 封面参考图未声明 → 图 1（封面默认锚点来源）
-    - 产品图/其他参考图N 未声明 → 不附加（未声明不猜测）
+    - 显式声明（如「参考图1用于图片1」）→ 按声明分配（可多个图号）
+    - 未声明 → 不附加（未声明不猜测），stderr 打印跳过提醒
     返回 {图号: [本地路径]}；声明的图号超出该行图片数时 stderr 警告并忽略。
     """
     assigned = {}
@@ -106,10 +105,8 @@ def assign_ref_images(ref_paths_by_name, decompose_text, n):
     declared = parse_ref_assignments(decompose_text, list(ref_paths_by_name))
     for name, paths in ref_paths_by_name.items():
         targets = declared.get(name)
-        if targets is None and "封面" in name:
-            targets = {1}
-        elif targets is None:
-            # 产品图/其他参考图N 未在拆图提示词显式声明 → 跳过，但打出提醒，
+        if targets is None:
+            # 全显式：未在拆图提示词声明 → 跳过，但打出提醒，
             # 避免用户以为「没传」是脚本遗漏（规则正确，仅补透明）。
             sys.stderr.write(
                 f"[refs] 提示: 参考图「{name}」检测到 {len(paths)} 张图片，"
@@ -267,8 +264,8 @@ def fetch_ref_images(url, sid, ref_cols, ref_names, row, out_dir,
                      decompose="", n=1):
     """下载该行参考图（单元格图片 / URL 文本）到 out_dir。
 
-    按「拆图提示词显式声明 > 列类型默认」分配到图号，返回 {图号: [本地路径]}；
-    分配规则见 assign_ref_images（封面参考图默认图1；其余未声明不附加）。
+    按「拆图提示词显式声明」全显式分配到图号，返回 {图号: [本地路径]}；
+    分配规则见 assign_ref_images（未声明不附加，无任何默认）。
     """
     if not ref_cols:
         return {}
@@ -422,10 +419,11 @@ def main():
         p_end = col_letter(col_index(pcol) + 11)
         p_map = rows_matrix(csv_get(a.url, a.sheet_id, f"{pcol}{rmin}:{p_end}{rmax}"), 12)
 
-        # 参考图列定位
+        # 参考图列定位：列名含「参考图」即为参考图列（参考图1/参考图2…），无类别之分；
+        # 哪张图用哪张参考图由拆图提示词显式声明（全显式，无默认分配）
         ref_cols, ref_names = [], []
         for key, letter in headers.items():
-            if key in ("产品图", "封面参考图") or key.startswith("其他参考图"):
+            if "参考图" in key:
                 ref_cols.append(letter)
                 ref_names.append(key)
 
@@ -473,6 +471,13 @@ def main():
 
     ordered = {str(r): results[str(r)] for r in rows if str(r) in results}
     print(json.dumps(ordered, ensure_ascii=False, indent=2))
+    incomplete = [r for r, v in ordered.items()
+                  if v.get("status") == "failed" or v.get("failed")]
+    if incomplete:
+        sys.stderr.write(
+            f"[resume] 行 {incomplete} 有未完成图号。重跑同一命令（同一 --out）"
+            f"可断点续跑：已完成图号自动复用 assetId，只补缺失图号，"
+            f"不重复消耗生成 credit。\n")
     failed_rows = [r for r, v in ordered.items() if v.get("status") == "failed"]
     if failed_rows:
         sys.stderr.write(f"失败行: {failed_rows}\n")
