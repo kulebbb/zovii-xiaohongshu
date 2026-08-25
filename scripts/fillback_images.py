@@ -104,7 +104,7 @@ def main():
                             "dry_run": True})
             continue
         try:
-            d = run(dl)
+            d = json.loads(run(dl))  # zovii -f json 输出的是 JSON 数组字符串
             local = d[0]["localPath"]
         except RuntimeError as e:
             results.append({"n": i + 1, "assetId": asset_id,

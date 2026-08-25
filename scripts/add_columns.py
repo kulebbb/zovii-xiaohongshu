@@ -57,10 +57,14 @@ def main():
         sys.exit(1)
 
     # 1. 读表头，找最后一个非空列
-    d = run(["lark-cli", "sheets", "+csv-get",
+    # lark-cli >=1.0.89 移除了 +csv-get --rows-json，改用 cells-get 解析
+    d = run(["lark-cli", "sheets", "+cells-get",
              "--url", a.url, "--sheet-id", a.sheet_id,
-             "--range", "A1:ZZ1", "--as", "user", "--rows-json"])
-    headers = d.get("data", {}).get("rows", [{}])[0].get("values", {})
+             "--range", "A1:ZZ1", "--as", "user", "--include", "value"])
+    r0 = d.get("data", {}).get("ranges", [{}])[0]
+    headers = {letter: (c or {}).get("value")
+               for letter, c in zip(r0.get("col_indices", []),
+                                    (r0.get("cells") or [[]])[0])}
     start_idx = 0
     for col, val in headers.items():
         if val not in (None, ""):

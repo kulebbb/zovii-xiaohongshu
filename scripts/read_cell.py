@@ -28,15 +28,14 @@ def main():
     ap.add_argument("--range", required=True, help="A1 格式，如 I2")
     a = ap.parse_args()
 
-    d = run(["lark-cli", "sheets", "+csv-get",
+    d = run(["lark-cli", "sheets", "+cells-get",
              "--url", a.url, "--sheet-id", a.sheet_id,
-             "--range", a.range, "--as", "user", "--rows-json"])
-    rows = d.get("data", {}).get("rows", [])
-    if not rows:
-        print("")
-        return
-    vals = rows[0].get("values", {})
-    for v in vals.values():
+             "--range", a.range, "--as", "user", "--include", "value"])
+    # lark-cli >=1.0.89 移除了 +csv-get --rows-json，改用 cells-get 解析
+    r0 = d.get("data", {}).get("ranges", [{}])[0]
+    row_cells = (r0.get("cells") or [[]])[0]
+    for c in row_cells:
+        v = c.get("value")
         if v not in (None, ""):
             print(v)
             return
